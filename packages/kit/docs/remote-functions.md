@@ -29,7 +29,7 @@ Import functions from `$app/server`. Use `query` to read dynamic data and
 // src/routes/blog/data.remote.js
 import * as v from 'valibot';
 import { query, form } from '$app/server';
-import * as db from '$lib/server/database.js';
+import * as db from '../../lib/server/database.js';
 
 export const getPosts = query(async () => db.getPosts());
 
@@ -47,7 +47,7 @@ Await a query in a component, or spread a form function onto a `<form>`:
 </script>
 
 <form {...createPost}>
-	<input name="title">
+	<input name="title" />
 	<button>Create post</button>
 </form>
 

@@ -20,7 +20,7 @@ Submit to the default action with a regular form. JavaScript is optional:
 
 ```svelte
 <form method="POST">
-	<label>Email <input name="email" type="email"></label>
+	<label>Email <input name="email" type="email" /></label>
 	<button>Sign in</button>
 </form>
 ```

@@ -750,6 +750,17 @@ test.describe('remote functions', () => {
 
 		// ...unless overridden by client issues
 		await expect(issues).not.toContainText('a is too short');
+
+		const d = page.locator('[name^="d"]');
+		await a.fill('abc');
+		await page.locator('[name^="b"]').fill('abc');
+		await page.locator('[name^="c"]').fill('abc');
+		await d.fill('taken');
+		await button.click();
+		await expect(issues).toContainText('That slug is taken');
+
+		await d.fill('available');
+		await expect(issues).not.toContainText('That slug is taken');
 	});
 
 	test('form validate works', async ({ page, javaScriptEnabled }) => {

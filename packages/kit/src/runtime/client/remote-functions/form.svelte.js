@@ -39,13 +39,26 @@ import {
  * @param {FormData} form_data
  * @param {InternalRemoteFormIssue[]} current_issues
  * @param {InternalRemoteFormIssue[]} client_issues
+ * @param {Record<string, any> | null} submitted_data
+ * @param {Record<string, any>} current_data
  * @returns {InternalRemoteFormIssue[]}
  */
-function merge_with_server_issues(form_data, current_issues, client_issues) {
+function merge_with_server_issues(
+	form_data,
+	current_issues,
+	client_issues,
+	submitted_data,
+	current_data
+) {
 	const client_names = new Set(client_issues.map((issue) => issue.name));
 
 	const merged = [
-		...current_issues.filter((issue) => issue.server && !client_names.has(issue.name)),
+		...current_issues.filter(
+			(issue) =>
+				issue.server &&
+				!client_names.has(issue.name) &&
+				is_server_issue_current(issue, submitted_data, current_data)
+		),
 		...client_issues
 	];
 
@@ -58,6 +71,51 @@ function merge_with_server_issues(form_data, current_issues, client_issues) {
 	}
 
 	return merged.sort((a, b) => (positions.get(a.name) ?? -1) - (positions.get(b.name) ?? -1));
+}
+
+/**
+ * A server issue is relevant only while the submitted value at its path is unchanged.
+ * @param {InternalRemoteFormIssue} issue
+ * @param {Record<string, any> | null} submitted_data
+ * @param {Record<string, any>} current_data
+ */
+function is_server_issue_current(issue, submitted_data, current_data) {
+	if (!submitted_data || issue.path.length === 0) return true;
+	return same_form_value(deep_get(submitted_data, issue.path), deep_get(current_data, issue.path));
+}
+
+/**
+ * Compare the form values supported by remote forms, including repeated fields.
+ * @param {any} a
+ * @param {any} b
+ */
+function same_form_value(a, b) {
+	if (Object.is(a, b)) return true;
+	if (Array.isArray(a) || Array.isArray(b)) {
+		return (
+			Array.isArray(a) &&
+			Array.isArray(b) &&
+			a.length === b.length &&
+			a.every((value, i) => same_form_value(value, b[i]))
+		);
+	}
+	if (typeof File !== 'undefined' && (a instanceof File || b instanceof File)) {
+		return (
+			a instanceof File &&
+			b instanceof File &&
+			a.name === b.name &&
+			a.size === b.size &&
+			a.type === b.type &&
+			a.lastModified === b.lastModified
+		);
+	}
+	if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+	if (Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false;
+	const keys = Object.keys(a);
+	return (
+		keys.length === Object.keys(b).length &&
+		keys.every((key) => Object.hasOwn(b, key) && same_form_value(a[key], b[key]))
+	);
 }
 
 /**
@@ -116,6 +174,7 @@ export function form(id) {
 
 		/** @type {InternalRemoteFormIssue[]} */
 		let raw_issues = $state.raw(initial?.issues ?? []);
+		let server_input = initial?.issues ? structuredClone(initial.input ?? {}) : null;
 
 		const issues = $derived(flatten_issues(raw_issues));
 
@@ -257,7 +316,18 @@ export function form(id) {
 								refreshes
 							);
 
-							({ issues: raw_issues = [], result } = response._ ?? {});
+							const response_issues = response._?.issues ?? [];
+							server_input = structuredClone(convert(form_data));
+							const current_submitter = element?.querySelector(
+								'button:not([type]), [type="submit"], [type="image"]'
+							);
+							const current_data = element
+								? convert(new FormData(element, current_submitter ?? undefined))
+								: input;
+							raw_issues = response_issues.filter((issue) =>
+								is_server_issue_current(issue, server_input, current_data)
+							);
+							result = response._?.result;
 
 							// if the developer took control of updates via `.updates(...)` (even with
 							// no arguments), or the server performed explicit refreshes, don't invalidateAll
@@ -288,6 +358,7 @@ export function form(id) {
 						} catch (e) {
 							result = undefined;
 							raw_issues = [];
+							server_input = null;
 							throw e;
 						} finally {
 							overrides?.forEach((fn) => fn());
@@ -361,7 +432,9 @@ export function form(id) {
 				raw_issues = merge_with_server_issues(
 					form_data,
 					raw_issues,
-					validated.issues.map((issue) => normalize_issue(issue, false))
+					validated.issues.map((issue) => normalize_issue(issue, false)),
+					server_input,
+					data
 				);
 
 				if (DEV) {
@@ -550,6 +623,16 @@ export function form(id) {
 					);
 				}
 
+				if (server_input) {
+					const submitter = form.querySelector(
+						'button:not([type]), [type="submit"], [type="image"]'
+					);
+					const current_data = convert(new FormData(form, submitter ?? undefined));
+					raw_issues = raw_issues.filter(
+						(issue) => !issue.server || is_server_issue_current(issue, server_input, current_data)
+					);
+				}
+
 				dirty[field.name] = true;
 			};
 
@@ -560,6 +643,7 @@ export function form(id) {
 
 				input = convert_formdata(action_id_without_key, new FormData(form));
 				raw_issues = [];
+				server_input = null;
 				touched = {};
 				dirty = {};
 				can_validate = {};
@@ -635,10 +719,17 @@ export function form(id) {
 						form_id: action_id_without_key,
 						get: () => input,
 						set: (path, value) => {
+							/** @type {Record<string, any>} */
+							let current_data = input;
 							if (path.length === 0) {
 								input = value;
+								current_data = value;
 							} else if (value !== deep_get(input, path)) {
 								deep_set(input, path.map(String), value);
+								if (server_input) {
+									current_data = structuredClone(server_input);
+									deep_set(current_data, path.map(String), value);
+								}
 
 								const key = build_path_string(path);
 
@@ -647,6 +738,12 @@ export function form(id) {
 									dirty[key] = true;
 									can_validate[key] = true;
 								}
+							}
+							if (server_input) {
+								raw_issues = raw_issues.filter(
+									(issue) =>
+										!issue.server || is_server_issue_current(issue, server_input, current_data)
+								);
 							}
 						},
 						get_issues: (path, all) => {
@@ -746,9 +843,14 @@ export function form(id) {
 
 					const is_server_validation = !validated?.issues && !preflightOnly;
 
-					raw_issues = is_server_validation
-						? array
-						: merge_with_server_issues(form_data, raw_issues, array);
+					if (is_server_validation) {
+						server_input = structuredClone(data);
+						raw_issues = array.filter((issue) =>
+							is_server_issue_current(issue, server_input, input)
+						);
+					} else {
+						raw_issues = merge_with_server_issues(form_data, raw_issues, array, server_input, data);
+					}
 				}
 			},
 			enhance: {
